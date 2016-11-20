@@ -27,8 +27,6 @@ In this blog post we'll be using the following:
 
 **Note:** All code is assumed to live at `$GOPATH/src/website` (feel free to change `website` to anything)
 
-**Note:** This post assumes you have a running concourse installation
-
 ## Writing a simple web app
 
 Let's create a simple `main.go`:
@@ -36,14 +34,17 @@ Let's create a simple `main.go`:
 ```go
 package main
 
-import "log"
-import "net/http"
+import (
+	"fmt"
+	"net/http"
+)
 
 func main() {
-  http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-    w.Write([]byte("<html><body>Hello World</body></html>"))
-  })
-  log.Fatal(http.ListenAndServe(":8080", nil))
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html><body>Hello World</body></html>"))
+	})
+	fmt.Println("Starting on :8080")
+	fmt.Println(http.ListenAndServe(":8080", nil))
 }
 ```
 
@@ -108,7 +109,7 @@ func startWebdriver() {
 				"chromeOptions": map[string][]string{
 					"args": []string{
 						"disable-gpu", // There is no GPU on our Ubuntu box!
-						"no-sandbox", // Sandbox requires namespace permissions that we don't have on a container
+						"no-sandbox",  // Sandbox requires namespace permissions that we don't have on a container
 					},
 				},
 			}),
@@ -149,7 +150,8 @@ var _ = Describe("Website", func() {
 })
 ```
 
-Run `ginkgo` to see this work.
+We'll need to make [chromedriver](https://sites.google.com/a/chromium.org/chromedriver/downloads) available on our `$PATH`
+before we can run this on our local machine. Once that's done, run `ginkgo` to see this work.
 
 ## Setting up your CI environment
 
@@ -197,10 +199,10 @@ Let's build our `Dockerfile`: `docker build . -t my-ci-container`
 
 Let's now enter the container and run test scripts as if we were the concourse task:
 
-1. First, enter the container with your entire $GOPATH mounted:
+1. First, enter the container with our app directory mounted:
 
     ```
-    docker run -it -v $(echo $GOPATH/src/website):/gopath my-ci-container
+    docker run -it -v $(echo $GOPATH/src/website):/gopath/src/website my-ci-container
     ```
 1. Let's run the following in the container:
 
@@ -214,3 +216,84 @@ Let's now enter the container and run test scripts as if we were the concourse t
     xvfb-run chromedriver &
     TEST_ENV=CI ginkgo -v
     ```
+
+## Debugging
+
+Chances are, something will go wrong along the way. Here's what we've used to debug this stack:
+
+### Flow
+
+test -> agouti -> chromedriver -> google-chrome -> X server (via xvfb-run)
+
+test->agouti: Tests use agouti
+agouti->chromedriver: Agouti talks to chromedriver over http
+chromedriver->google-chrome: Chromedriver spins up google-chrome instances for each 'session' (in agouti this is NewPage)
+google-chrome->X server: The X server acts as the 'gui' for google-chrome. It can be started with `Xvfb` or by wrapping the `chromedriver` call with `xvfb-run`
+
+### Debugging chromedriver
+
+Chromedriver can manually be run with the `chromedriver` command. Helpful tips:
+
+- `chromedriver --verbose` reveals a lot of info, including the command it runs `google-chrome` with!
+- Agouti can spin up chromedriver itself with `agouti.ChromeDriver().Start()`
+- Agouti can spin up chromedriver with `--verbose` by crafting your own `NewWebDriver` command (`.ChromeDriver()` is a very light wrapper)
+
+### Debugging google-chrome
+
+Google-chrome can manually be run with the `google-chrome` command. Here are some common errors:
+
+---
+
+```
+Failed to move to new namespace: PID namespaces supported, Network namespace supported, but failed: errno = Operation not permitted
+Illegal instruction
+```
+
+`google-chrome` is trying to do sandbox-y things that a container won't let it do. Run with `--no-sandbox` option: `google-chrome --no-sandbox`
+
+---
+
+```
+root@6a59557360dd:/gopath/src/website# [1120/020402:ERROR:nacl_helper_linux.cc(311)] NaCl helper process running without a sandbox!
+Most likely you need to configure your SUID sandbox correctly
+
+```
+
+This cryptic error probably means that `google-chrome` is having trouble connecting to the X server. Run `xvfb-run google-chrome --no-sandbox`, or
+start X server manually (xvfb-run wraps this):
+
+```
+Xvfb :99 &
+export DISPLAY=:99
+google-chrome --no-sandbox
+```
+
+---
+
+```
+libGL error: failed to load driver: swrast
+[1308:1332:1120/020823:ERROR:browser_gpu_channel_host_factory.cc(113)] Failed to launch GPU process.
+```
+
+This container has no GPU. Run with `--disable-gpu` option: `xvfb-run google-chrome --disable-gpu --no-sandbox`
+
+---
+
+```
+[1141:1152:1120/020700:ERROR:bus.cc(434)] Failed to connect to the bus: Failed to connect to socket /var/run/dbus/system_bus_socket: No such file or directory
+```
+
+The `dbus` service hasn't started. You can:
+
+- Check status with `service --status-all`
+- Restart dbus with `service dbus restart` (be sure to `service --status-all` after)
+- Modify `/etc/init.d/dbus` with log statements and the like to further debug
+
+---
+
+```
+Xlib:  extension "RANDR" missing on display ":99".
+```
+
+[You can ignore this error.](http://askubuntu.com/questions/754382/how-do-i-start-chromium-browser-in-headless-mode-extension-randr-missing-on-d)
+
