@@ -36,13 +36,14 @@ Let's create a simple `main.go`:
 ```go
 package main
 
+import "log"
 import "net/http"
 
 func main() {
   http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
     w.Write([]byte("<html><body>Hello World</body></html>"))
   })
-  http.ListenAndServe(":8080", nil)
+  log.Fatal(http.ListenAndServe(":8080", nil))
 }
 ```
 
@@ -96,7 +97,7 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	Expect(page.Destroy()).To(Succeed())
 	Expect(agoutiDriver.Stop()).To(Succeed())
-	websiteSession.Terminate()
+	websiteSession.Kill()
 })
 
 func startWebdriver() {
@@ -107,7 +108,7 @@ func startWebdriver() {
 				"chromeOptions": map[string][]string{
 					"args": []string{
 						"disable-gpu", // There is no GPU on our Ubuntu box!
-						"no-sandbox",  // Sandbox requires namespace permissions that we don't have on a container
+						"no-sandbox", // Sandbox requires namespace permissions that we don't have on a container
 					},
 				},
 			}),
@@ -141,8 +142,8 @@ import (
 
 var _ = Describe("Website", func() {
 	It("Displays hello world", func() {
-		Expect(page.Navigate("http://localhost:8080/")).To(Succeed())
-		Eventually(page).Should(HaveURL("http://localhost:8080/"))
+		Expect(page.Navigate("http://127.0.0.1:8080/")).To(Succeed())
+		Eventually(page).Should(HaveURL("http://127.0.0.1:8080/"))
 		Expect(page.Find("body")).To(HaveText("Hello World"))
 	})
 })
@@ -190,10 +191,26 @@ RUN chmod +x chromedriver
 RUN mv -f chromedriver /usr/local/bin/chromedriver
 ```
 
-Test this `Dockerfile` works: `docker build .`
+Let's build our `Dockerfile`: `docker build . -t my-ci-container`
 
-**Note:** You can SSH into this box with `docker images` (grab the latest built <image-id>) and `docker run -it <image-id> /bin/bash`
+## Running your test headlessly
 
-## Running your test headlessly on CI
+Let's now enter the container and run test scripts as if we were the concourse task:
 
-tbd
+1. First, enter the container with your entire $GOPATH mounted:
+
+    ```
+    docker run -it -v $(echo $GOPATH/src/website):/gopath my-ci-container
+    ```
+1. Let's run the following in the container:
+
+    ```
+    export GOPATH=/gopath
+    export PATH=$PATH:$GOPATH/bin
+    go get github.com/onsi/ginkgo/ginkgo
+    go get github.com/onsi/gomega
+    go get github.com/sclevine/agouti
+    cd $GOPATH/src/website
+    xvfb-run chromedriver &
+    TEST_ENV=CI ginkgo -v
+    ```
